@@ -54,12 +54,12 @@ public class CozyBabyNode implements NodePlugin<Long, double[]> {
     }
 
     @Override
-    public void inputPluginInitialize() {
+    public void inputPluginStart() {
         monoSensor.switchDevOnAsync();
     }
 
     @Override
-    public void inputPluginFinalize() {
+    public void inputPluginStop() {
         monoSensor.disconnect();
     }
 
@@ -155,10 +155,10 @@ public class CozyBabyNode implements NodePlugin<Long, double[]> {
                     case ECG_SENSOR_STATUS:
                         break;
                     case ECG_VALUE:
-                        parent.ecg.sensorValue(getTime().getMonoUTCNanos(), value);
+                        parent.ecg.sensorValue(timestamp, value);
                         break;
                     case MEMS_XYZ:
-                        parent.mems.sensorValue(getTime().getMonoUTCNanos(), value);
+                        parent.mems.sensorValue(timestamp, value);
                         break;
                 }
             }
@@ -178,11 +178,6 @@ public class CozyBabyNode implements NodePlugin<Long, double[]> {
                 Log.v(this.getClass().getSimpleName(), "log::" + message);
             }
         };
-
-        @Override
-        public int getReceivedMessagesCount() {
-            return received;
-        }
     }
 
     public static class CBECG extends CBSensor {

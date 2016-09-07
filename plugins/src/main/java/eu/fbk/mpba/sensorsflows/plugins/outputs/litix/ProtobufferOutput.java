@@ -12,7 +12,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.zip.GZIPOutputStream;
 
 import eu.fbk.mpba.sensorsflows.OutputPlugin;
@@ -23,11 +22,11 @@ import eu.fbk.mpba.sensorsflows.plugins.outputs.litix.Litix.SensorInfo;
 
 public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
 
-    public static final String TS_PACKAGES =      "Packets         ";
-    public static final String TS_TOTAL_KB =      "Total       [KB]";
-    public static final String TS_COMPRESSED_KB = "Compressed  [KB]";
-    public static final String TS_COMPRESSED =    "Compressed   [%]";
-    public static final String TS_PACKTIMEOUT =   "Max buf time [s]";
+    public static final String TS_PACKAGES =      "splits-buffered   ";
+    public static final String TS_TOTAL_KB =      "data-raw      [KB]";
+    public static final String TS_COMPRESSED_KB = "data-gzipped  [KB]";
+    public static final String TS_COMPRESSED =    "data-gz-ratio  [%]";
+    public static final String TS_PACKTIMEOUT =   "split-time-max [s]";
     private final SplitEvent mOnSplit;
     private Integer mSessionID;
     private Integer mTrackID;
@@ -54,7 +53,7 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
     }
 
     private final SplitterParams mSplitter;
-    protected SQLiteDatabase buffer;
+    protected final SQLiteDatabase buffer;
     protected List<SensorInfo> mSensorInfo = new ArrayList<>();
     protected HashMap<ISensor, Integer> mReverseSensors = new HashMap<>();
     protected List<Litix.SensorData> mSensorData = new ArrayList<>();
@@ -63,38 +62,23 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
     protected Object mSessionTag = "undefined";
     protected int splits = 0;
     private String mName;
-    private int mReceived = 0;
-    private int mForwarded = 0;
     private long mForwardedBytes = 0;
     private long mReceivedBytes = 0;
 
     private TextStatusUpdater mUpd;
-    HashMap<String, Object> tsParams = new HashMap<>();
-    long tsLastUpd = 0;
-
-    public interface TextStatusUpdater {
-        void updateTextStatus(String text);
-    }
 
     public void setTextStatusUpdater(TextStatusUpdater upd) {
+        upd.textStatusPut(TS_PACKAGES, splits);
+        upd.textStatusPut(TS_TOTAL_KB, 0);
+        upd.textStatusPut(TS_COMPRESSED_KB, 0);
+        upd.textStatusPut(TS_COMPRESSED, 0);
+        upd.textStatusPut(TS_PACKTIMEOUT, mSplitter.maxSplitTime / 1000.);
         this.mUpd = upd;
     }
 
     void textStatusPut(String k, Object v) {
         if (mUpd != null) {
-            Object x = tsParams.put(k, v);
-            if (x != null &&  x != v)
-                if (SystemClock.elapsedRealtime() - tsLastUpd > 33) {
-                    tsLastUpd = SystemClock.elapsedRealtime();
-                    StringBuilder text = new StringBuilder();
-                    for (Map.Entry<String, Object> e : tsParams.entrySet())
-                        text
-                                .append(e.getKey())
-                                .append(": \t")
-                                .append(e.getValue())
-                                .append('\n');
-                    mUpd.updateTextStatus(text.toString());
-                }
+            mUpd.textStatusPut(k, v);
         }
     }
 
@@ -142,7 +126,7 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
 
         @Override
         public String toString() {
-            return "-\nratio=" + compressionRatio + "\nflushSize=" + getFlushSize() + "\nadjust=" + adjust;
+            return "- ratio=" + compressionRatio + " flushSize=" + getFlushSize() + " adjust=" + adjust;
         }
     }
 
@@ -158,11 +142,11 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
         mSplitter = params;
         mOnSplit = callback;
 
-        //noinspection ResultOfMethodCallIgnored
-//        mDatabaseFile.mkdirs();
-//        buffer = SQLiteDatabase.openOrCreateDatabase(mDatabaseFile, null);
-        buffer.execSQL(Queries.i1);
-        buffer.execSQL(Queries.i2);
+        // sync for db
+        synchronized (buffer) {
+            buffer.execSQL(Queries.i1);
+            buffer.execSQL(Queries.i2);
+        }
     }
 
     public long currentBacklogSize() {
@@ -190,9 +174,8 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
             sb.addAllSensors(mSensorInfo);
 
         final Litix.TrackSplit ts = sb.build();
-        final long bks = currentBacklogSize();
 
-        textStatusPut(TS_PACKAGES, splits + 1);
+        textStatusPut(TS_PACKAGES, splits);
 
         mSensorData.clear();
         mSensorEvent.clear();
@@ -224,20 +207,22 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
 
                     textStatusPut(TS_TOTAL_KB, (mReceivedBytes+=raw.size())/1000.);
                     textStatusPut(TS_COMPRESSED_KB, (mForwardedBytes+=compressed.size())/1000.);
-                    textStatusPut(TS_COMPRESSED, Math.round((1. - mForwardedBytes / (double) mReceivedBytes) * 100));
+                    textStatusPut(TS_COMPRESSED, Math.round((mForwardedBytes / (double) mReceivedBytes) * 100));
 
-                    SQLiteStatement s = buffer.compileStatement(Queries.s);
-                    s.clearBindings();
-                    s.bindLong(1, split_id);
-                    s.bindLong(2, mTrackID);
-                    s.bindBlob(3, compressed.toByteArray());
-                    s.executeInsert();
-                    s.close();
+                    // sync for db
+                    synchronized (buffer) {
+                        SQLiteStatement s = buffer.compileStatement(Queries.s);
+                        s.clearBindings();
+                        s.bindLong(1, split_id);
+                        s.bindLong(2, mTrackID);
+                        s.bindBlob(3, compressed.toByteArray());
+                        s.executeInsert();
+                        s.close();
+                    }
 
                     compressed.close();
 
                     splits++;
-                    ProtobufferOutput.this.mForwarded += bks;
 
                     if (mOnSplit != null) {
                         mOnSplit.newSplit(ProtobufferOutput.this, split_id, mSplitter);
@@ -253,12 +238,6 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
                 }
             }
         }, "Flush").start();
-    }
-
-    private static long bootUTCNanos = System.currentTimeMillis() * 1_000_000L - System.nanoTime();
-
-    public static long getMonoTimeMillis() {
-        return (System.nanoTime() + bootUTCNanos) / 1_000_000L;
     }
 
     // OutputPlugIn implementation
@@ -285,19 +264,16 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
         if (mTrackID == null || mSessionID == null)
             mTrackID = mSessionID = 0;
         else {
-            SQLiteStatement
-            stmt = buffer.compileStatement(Queries.t);
-            stmt.bindLong(1, mTrackID);
-            stmt.bindLong(2, mSessionID);
-            stmt.bindString(3, mSessionTag.toString());
-            stmt.executeInsert();
+            // sync for db
+            synchronized (buffer) {
+                SQLiteStatement
+                        stmt = buffer.compileStatement(Queries.t);
+                stmt.bindLong(1, mTrackID);
+                stmt.bindLong(2, mSessionID);
+                stmt.bindString(3, mSessionTag.toString());
+                stmt.executeInsert();
+            }
         }
-
-        textStatusPut(TS_PACKAGES, splits);
-        textStatusPut(TS_TOTAL_KB, 0);
-        textStatusPut(TS_COMPRESSED_KB, 0);
-        textStatusPut(TS_COMPRESSED, 0);
-        textStatusPut(TS_PACKTIMEOUT, mSplitter.maxSplitTime / 1000.);
     }
 
     private boolean finalized = true;
@@ -312,7 +288,6 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
 
     @Override
     public void newSensorEvent(SensorEventEntry<Long> event) {
-        mReceived++;
         mSensorEvent.add(Litix.SensorEvent.newBuilder()
                         .setTimestamp(event.timestamp)
                         .setCode(event.code)
@@ -327,7 +302,6 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
     // TODO Remove timestamp freedom degrees
     @Override
     public void newSensorData(SensorDataEntry<Long, double[]> data) {
-        mReceived++;
         Double[] boxed = new Double[data.value.length];
         for (int i = 0; i < data.value.length; i++)
             boxed[i] = data.value[i];
@@ -356,15 +330,5 @@ public class ProtobufferOutput implements OutputPlugin<Long, double[]> {
     protected void finalize() throws Throwable {
         close();
         super.finalize();
-    }
-
-    @Override
-    public int getReceivedMessagesCount() {
-        return mReceived;
-    }
-
-    @Override
-    public int getForwardedMessagesCount() {
-        return mForwarded;
     }
 }

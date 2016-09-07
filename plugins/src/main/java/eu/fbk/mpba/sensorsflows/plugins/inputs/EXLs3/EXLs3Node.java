@@ -31,6 +31,7 @@ public class EXLs3Node implements NodePlugin<Long, double[]> {
     public EXLs3Node(BluetoothDevice realDevice, BluetoothAdapter adapter, String name, int quaternionDecimation, int batteryDecimation) {
         this.name = name;
         sn = new EXLSamplenum(this);
+        sn.switchOffAsync();
         er = new EXLAccelerometer(this);
         ry = new EXLBattery(this);
         pe = new EXLGyroscope(this);
@@ -43,7 +44,7 @@ public class EXLs3Node implements NodePlugin<Long, double[]> {
 
     @Override
     public Iterable<SensorComponent<Long, double[]>> getSensors() {
-        return new ReadOnlyIterable<>(Arrays.asList((SensorComponent<Long, double[]>) sn, er, pe, ma, on, ry).iterator());
+        return new ReadOnlyIterable<>(Arrays.asList((SensorComponent<Long, double[]>) er, pe, ma, on, ry).iterator());
     }
 
     @Override
@@ -62,12 +63,12 @@ public class EXLs3Node implements NodePlugin<Long, double[]> {
     }
 
     @Override
-    public void inputPluginInitialize() {
+    public void inputPluginStart() {
         monoSensor.switchDevOnAsync();
     }
 
     @Override
-    public void inputPluginFinalize() {
+    public void inputPluginStop() {
         monoSensor.disconnect();
     }
 
@@ -187,11 +188,6 @@ public class EXLs3Node implements NodePlugin<Long, double[]> {
                 Log.v(EXLs3Node.class.getSimpleName() + " " + sender.mDevice.getAddress(), "lost:" + howMany + " fr:" + from + " to:" + to);
             }
         };
-
-        @Override
-        public int getReceivedMessagesCount() {
-            return received;
-        }
     }
 
     public static class EXLSamplenum extends EXLs3Node.EXLSensor {
@@ -201,7 +197,7 @@ public class EXLs3Node implements NodePlugin<Long, double[]> {
         }
 
         public List<Object> getValueDescriptor() {
-            return Collections.singletonList((Object) "snum");
+            return Collections.singletonList((Object) "number");
         }
 
     }
